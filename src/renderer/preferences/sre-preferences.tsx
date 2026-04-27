@@ -92,6 +92,7 @@ const TOOL_LABELS: Record<keyof ToolsConfig["tools"], string> = {
 
 export function SrePreferencesInput() {
   const [endpoint, setEndpoint] = useState(chatStore.ollamaEndpoint);
+  const [apiKey, setApiKey] = useState(chatStore.openaiApiKey);
   const [autoRefresh, setAutoRefresh] = useState(chatStore.autoRefreshContext);
   const [toolsConfig, setToolsConfigState] = useState<ToolsConfig>(() => ({
     ...DEFAULT_TOOLS_CONFIG,
@@ -103,6 +104,12 @@ export function SrePreferencesInput() {
     const val = e.target.value;
     setEndpoint(val);
     chatStore.setEndpoint(val);
+  }, []);
+
+  const onApiKeyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setApiKey(val);
+    chatStore.setOpenAIApiKey(val);
   }, []);
 
   const onAutoRefreshChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -130,10 +137,9 @@ export function SrePreferencesInput() {
   return (
     <div style={sty.container}>
       <div style={sty.section}>
-        <label style={sty.label}>Ollama Endpoint</label>
+        <label style={sty.label}>Endpoint</label>
         <div style={sty.sublabel}>
-          The URL of your Ollama instance. You can also configure this from the chat UI
-          by clicking the Ollama badge.
+          Insert your AI endpoint URL. The plugin auto-detects Ollama or OpenAI-compatible API.
         </div>
         <input
           style={sty.input}
@@ -141,6 +147,20 @@ export function SrePreferencesInput() {
           value={endpoint}
           onChange={onEndpointChange}
           placeholder="http://localhost:11434"
+        />
+      </div>
+
+      <div style={sty.section}>
+        <label style={sty.label}>API Key (optional)</label>
+        <div style={sty.sublabel}>
+          Required only for protected OpenAI-compatible endpoints.
+        </div>
+        <input
+          style={sty.input}
+          type="password"
+          value={apiKey}
+          onChange={onApiKeyChange}
+          placeholder="sk-..."
         />
       </div>
 
@@ -202,7 +222,7 @@ export function SrePreferencesInput() {
 export function SrePreferencesHint() {
   return (
     <span>
-      Configure the Ollama endpoint for the K8s SRE Assistant.
+      Configure Ollama or any OpenAI-compatible endpoint for the K8s SRE Assistant.
       Model selection, parameters, and connection testing are in the chat UI.
     </span>
   );

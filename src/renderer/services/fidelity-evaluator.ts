@@ -18,7 +18,7 @@
 
 import http from "http";
 import https from "https";
-import type { FidelityDiscrepancy, FidelityReport } from "../../common/types";
+import type { ApiProvider, FidelityDiscrepancy, FidelityReport } from "../../common/types";
 
 /* ─── HTTP helper (duplicated from ollama-service to keep this module standalone) ── */
 
@@ -36,6 +36,42 @@ function nodePost(url: string, body: string, timeoutMs = 120_000): Promise<NodeR
         path: parsed.pathname + parsed.search,
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c: Buffer) => { data += c.toString(); });
+        res.on("end", () => {
+          const s = res.statusCode ?? 0;
+          resolve({ status: s, ok: s >= 200 && s < 300, body: data });
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Fidelity request timeout")); });
+    req.write(body);
+    req.end();
+  });
+}
+
+function nodePostWithHeaders(
+  url: string,
+  body: string,
+  headers: Record<string, string>,
+  timeoutMs = 120_000,
+): Promise<NodeResponse> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const transport = parsed.protocol === "https:" ? https : http;
+
+    const req = transport.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers,
         timeout: timeoutMs,
       },
       (res) => {
@@ -267,6 +303,43 @@ async function ollamaCall(
   };
 }
 
+async function openAICompatibleCall(
+  endpoint: string,
+  model: string,
+  systemPrompt: string,
+  userMessage: string,
+  timeoutMs: number,
+  apiKey?: string,
+): Promise<CallResult> {
+  const payload = {
+    model,
+    stream: false,
+    temperature: 0.1,
+    top_p: 0.9,
+    max_tokens: 2000,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+  };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey?.trim()) headers.Authorization = `Bearer ${apiKey.trim()}`;
+
+  const url = `${endpoint.replace(/\/+$/, "")}/v1/chat/completions`;
+  const t0 = Date.now();
+  const res = await nodePostWithHeaders(url, JSON.stringify(payload), headers, timeoutMs);
+  const latencyMs = Date.now() - t0;
+  if (!res.ok) throw new Error(`OpenAI-compatible API error: HTTP ${res.status} — ${res.body.slice(0, 200)}`);
+
+  const data = JSON.parse(res.body);
+  return {
+    text: data?.choices?.[0]?.message?.content || "",
+    latencyMs,
+    promptTokens: data?.usage?.prompt_tokens ?? 0,
+    evalTokens: data?.usage?.completion_tokens ?? 0,
+  };
+}
+
 /* ─── Public API ─────────────────────────────────────────────────────────── */
 
 export interface FidelityEvalOptions {
@@ -274,6 +347,10 @@ export interface FidelityEvalOptions {
   endpoint: string;
   /** Model name to use for all three calls (diagnose A, diagnose B, judge). */
   model: string;
+  /** API provider used by the chat runtime. */
+  provider?: ApiProvider;
+  /** Optional API key for OpenAI-compatible endpoints. */
+  apiKey?: string;
   /**
    * The diagnostic prompt template.
    * Use {{data}} as placeholder for the K8s context block.
@@ -348,7 +425,7 @@ export async function runFidelityEvaluation(
   compressed: string,
   options: FidelityEvalOptions,
 ): Promise<FidelityReport> {
-  const { endpoint, model, timeoutMs = 120_000 } = options;
+  const { endpoint, model, provider = "ollama", apiKey, timeoutMs = 120_000 } = options;
   const diagPromptTemplate = options.diagnosticPrompt ?? DEFAULT_DIAGNOSTIC_PROMPT;
   const rawStr = typeof rawData === "string" ? rawData : JSON.stringify(rawData, null, 2);
 
@@ -360,10 +437,14 @@ export async function runFidelityEvaluation(
 
   console.log("[Fidelity] Starting evaluation — model:", model, "| raw chars:", rawStr.length, "| compressed chars:", compressed.length);
 
+  const callModel = provider === "openai-compatible"
+    ? (systemPrompt: string, userPrompt: string) => openAICompatibleCall(endpoint, model, systemPrompt, userPrompt, timeoutMs, apiKey)
+    : (systemPrompt: string, userPrompt: string) => ollamaCall(endpoint, model, systemPrompt, userPrompt, timeoutMs);
+
   // ── Step 1: Run both diagnostic calls in parallel ───────────────────────
   const [resultA, resultB] = await Promise.all([
-    ollamaCall(endpoint, model, systemPrompt, promptA, timeoutMs),
-    ollamaCall(endpoint, model, systemPrompt, promptB, timeoutMs),
+    callModel(systemPrompt, promptA),
+    callModel(systemPrompt, promptB),
   ]);
 
   console.log("[Fidelity] DiagA:", resultA.text.length, "chars,", resultA.latencyMs, "ms");
@@ -397,7 +478,7 @@ export async function runFidelityEvaluation(
       .replace("{{diagA}}", resultA.text)
       .replace("{{diagB}}", resultB.text);
 
-    const judgeResult = await ollamaCall(endpoint, model, JUDGE_SYSTEM, judgeUserMsg, timeoutMs);
+    const judgeResult = await callModel(JUDGE_SYSTEM, judgeUserMsg);
     judgeScore = parseJudgeScore(judgeResult.text);
 
     // Parse HALLUCINATED_RESOURCES section from judge response

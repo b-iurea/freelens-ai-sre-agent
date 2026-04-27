@@ -16,6 +16,8 @@ export interface OllamaConfig {
   model: string;
 }
 
+export type ApiProvider = "ollama" | "openai-compatible";
+
 export interface ClusterContext {
   clusterName: string;
   namespace: string;
@@ -379,10 +381,14 @@ export interface ApiMessage {
   role: string;
   content: string;
   tool_calls?: OllamaToolCall[];
+  /** OpenAI-compatible tool result messages use this to bind tool output to a prior call. */
+  tool_call_id?: string;
 }
 
 /** A single tool-call request produced by the model. */
 export interface OllamaToolCall {
+  /** Present on OpenAI-compatible tool calls. */
+  id?: string;
   function: {
     name: string;
     /** JSON-decoded arguments from the model. */

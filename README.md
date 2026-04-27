@@ -2,10 +2,10 @@
 
 https://b-iurea.github.io/freelens-ollama-extension/
 
-An AI-powered **Kubernetes SRE (Site Reliability Engineer)** assistant embedded directly in Freelens. Chat with a local Ollama model that sees your live cluster state and adapts its response format to what you're actually asking.
+An AI-powered **Kubernetes SRE (Site Reliability Engineer)** assistant embedded directly in Freelens. Chat with any AI model — via **Ollama** or any **OpenAI-compatible endpoint** (LocalAI, OpenAI, LM Studio, etc.) — that sees your live cluster state and adapts its response format to what you're actually asking.
 
 ![Freelens Extension](https://img.shields.io/badge/Freelens-Extension-blue)
-![Version](https://img.shields.io/badge/version-0.3.2-orange)
+![Version](https://img.shields.io/badge/version-0.4.0-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 <b>This is a vibecoded plugin so feel free to steal, edit, update or improve.
@@ -19,15 +19,16 @@ All suggestions are welcome. </b>
 
 - **AI Chat Interface** — Conversational assistant integrated directly into the Freelens cluster view
 - **Live Cluster Awareness** — The model sees pods, deployments, services, nodes, and events via direct `KubeApi.list()` calls
-- **Ollama Integration** — Local or remote Ollama; no data leaves your network
+- **AI Engine Agnostic** — Works with **Ollama**, **LocalAI**, **OpenAI**, or any OpenAI-compatible endpoint; no mandatory cloud dependency. Auto-detects the provider from the endpoint URL — just paste and go
 - **Streaming Responses** — Block-level Markdown renderer safe for incomplete streamed output
 - **Cancelable** — Interrupt generation at any time
 
 ### Network & Compatibility
 
-- **No Mixed-Content Issues** — All Ollama API calls use Node.js `http`/`https` modules; plain HTTP remote Ollama works reliably from the Electron renderer
+- **No Mixed-Content Issues** — All AI API calls use Node.js `http`/`https` modules; plain HTTP remote endpoints work reliably from the Electron renderer
 - **Remote Ollama** — Full support for remote instances (`OLLAMA_ORIGINS=*`, `OLLAMA_HOST=0.0.0.0:11434`)
-- **Cloud Ollama** — `num_predict: -1` and other unsupported params are automatically stripped before sending
+- **OpenAI-compatible endpoints** — LocalAI, LM Studio, OpenAI, or any `/v1/chat/completions`-compatible backend; optional API key support
+- **Cloud endpoints** — `num_predict: -1` and other Ollama-specific params are automatically stripped before sending to OpenAI-compatible APIs
 
 ---
 
@@ -185,39 +186,59 @@ Launch SRE analysis directly from any workload — no need to open the chat and 
 
 Supported kinds: **Pod**, **Deployment**, **StatefulSet**, **DaemonSet**, **ReplicaSet**.
 
+---
+
+### OpenAI-Compatible Endpoint Support (v0.4.0)
+
+Use any AI backend that speaks the OpenAI API — no manual configuration needed.
+
+- **Auto-detection** — paste the base URL; the plugin probes `/api/tags` (Ollama) and `/v1/models` (OpenAI-compatible) and selects the right mode automatically
+- **Optional API Key** — enter once in the Connection Panel or Preferences; sent as `Authorization: Bearer <key>` on every request
+- **Endpoint normalisation** — pasting a full URL like `http://host:8080/v1/models` works; the `/v1/models` suffix is stripped automatically
+- **Auth-aware probing** — `401 Unauthorized` from `/v1/models` is correctly recognised as "endpoint reachable, API key required" (not "unreachable")
+- **Tested with** Ollama, LocalAI, LM Studio, OpenAI API
 
 ---
 
 ## Requirements
 
 - **Freelens** >= 1.4.0
-- **Ollama** running locally or on the network
-- At least one model pulled (recommended below)
+- **Ollama** running locally or on the network, **or** any **OpenAI-compatible AI backend** (LocalAI, LM Studio, OpenAI, etc.)
+- At least one model available on your endpoint
 
 ---
 
 ## Quick Start
 
-### 1. Install Ollama
+### Option A — Ollama (local)
 
 ```bash
 # macOS / Linux
 curl -fsSL https://ollama.com/install.sh | sh
 ollama serve
-```
 
-### 2. Pull a Model
-
-```bash
-# Minimum recommended: 7B for tool-calling and structured reasoning
+# Pull a model (minimum 7B recommended)
 ollama pull qwen2.5:7b      # 7B   — strong at YAML, structured data, and tool use
 ollama pull mistral          # 7B   — solid all-rounder
 ollama pull gemma3:9b        # 9B   — strong reasoning, handles large clusters well
 ollama pull llama3.1:8b     # 8B   — good tool-calling support
-
-# Cloud (via compatible endpoint)
-# qwen3.5:cloud, gpt-4o, etc. — use Preferences to configure a custom endpoint
 ```
+
+### Option B — OpenAI-compatible endpoint (LocalAI, LM Studio, OpenAI, etc.)
+
+Any backend that exposes `/v1/chat/completions` and `/v1/models` works out of the box.
+
+```bash
+# LocalAI example
+docker run -p 8080:8080 localai/localai:latest
+
+# Or point directly to OpenAI / any hosted endpoint
+# Endpoint: https://api.openai.com
+# API Key:  sk-...
+```
+
+In the plugin's **Connection Panel**, enter the base URL (e.g. `http://localhost:8080`).  
+The provider is **auto-detected** — no manual toggle needed. If your endpoint requires authentication, fill in the optional **API Key** field.
 
 > ⚠️ **Models smaller than 4B parameters are not reliably supported.** Tool-calling, structured JSON, and multi-step reasoning require sufficient model capacity. Models like `llama3.2:3b` or `phi4-mini:3.8b` may work for simple queries but fail on tool calls and investigation workflows.
 
@@ -267,12 +288,13 @@ Shows what data was used for the last response:
 | Deployments | Filtered count + degraded count |
 | Warning Events | Number of active warning events |
 
-### Connection Panel (Ollama badge)
+### Connection Panel (AI endpoint badge)
 
-Click the **Ollama** / **Disconnected** badge:
+Click the provider badge (e.g. **Ollama**, **OpenAI-compatible**, or **Disconnected**):
 
-- **Endpoint** — set the Ollama URL (e.g. `http://192.168.1.71:11434`)
-- **Test Connection** — uses Node.js HTTP, bypasses browser mixed-content
+- **Endpoint** — base URL of your AI backend (e.g. `http://localhost:11434`, `http://192.168.1.239:8080`, `https://api.openai.com`)
+- **API Key** — optional; required for endpoints that enforce authentication
+- **Test Connection** — auto-detects provider (Ollama or OpenAI-compatible), uses Node.js HTTP, bypasses browser mixed-content
 - **Debug log** — detailed diagnostics with troubleshooting hints
 
 ### Namespace Selector
@@ -311,7 +333,8 @@ After each response a button shows generation speed. Click to expand:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Ollama Endpoint | `http://localhost:11434` | URL of your Ollama instance |
+| AI Endpoint | `http://localhost:11434` | Base URL of your Ollama or OpenAI-compatible backend |
+| API Key | _(empty)_ | Optional authentication key for endpoints that require it |
 | Auto-refresh context | `true` | Gather cluster state before each message |
 
 ---
@@ -333,13 +356,13 @@ src/
 │   ├── pages/sre-assistant-page.tsx
 │   ├── preferences/sre-preferences.tsx
 │   ├── services/
-│   │   ├── ollama-service.ts       # Ollama API: Node.js HTTP, streaming, stats, system prompt
+│   │   ├── ollama-service.ts       # AI service: Node.js HTTP, auto-detects Ollama or OpenAI-compatible, streaming, stats, system prompt
 │   │   ├── k8s-context-service.ts  # K8s context via KubeApi.list() + raw resource cache
 │   │   └── context/
 │   │       ├── index.ts            # Barrel export
 │   │       ├── chunk-manager.ts    # Sliding-window chunker (~300 words, 50 overlap)
 │   │       ├── bm25-retriever.ts   # Pure-TS BM25 (k1=1.5, b=0.75), K8s-aware tokenizer
-│   │       ├── summary-manager.ts  # Background Ollama-based conversation compression
+│   │       ├── summary-manager.ts  # Background AI-based conversation compression
 │   │       ├── context-builder.ts  # Assembles: system -> summary -> BM25 chunks -> recent -> query
 │   │       ├── cluster-memory.ts   # Persistent snapshot, namespace rollup, BM25 query filter
 │   │       ├── k8s-tools.ts        # Tool definitions + executors (all tool kinds)
@@ -380,7 +403,7 @@ src/
         -> system + summary + BM25 chunks + recent turns + query
         -> Jaccard deduplication removes chunks redundant with recent messages
 
- 9. OllamaService.streamChatAssembled()
+ 9. OllamaService.streamChatAssembled()  [Ollama /api/chat or OpenAI /v1/chat/completions]
         -> streaming response + performance stats capture
 
 10. [post-response] SummaryManager.maybeCompress()
@@ -398,7 +421,6 @@ src/
 - Anomalous resources always survive filtering regardless of query
 - Namespace health rollup gives global cluster visibility at negligible token cost
 - Intent detection skips all analysis overhead for YAML/explain/general queries
-
 ---
 
 ## Known Issues
@@ -409,7 +431,8 @@ src/
 | 2 | **Fidelity score not working as intended** | The hallucination detector produces noisy results on small or fast models and may flag correct K8s names. Score should be treated as indicative only. | WIP |
 | 3 | **Canvas graph: node labels truncated** — resource names are truncated to fit the fixed node width, making it hard to distinguish replicas of the same resource (e.g. three pods named `api-server-7fd464bcc...` all look identical). Kind prefix (`Deployment:`, `Pod:`) uses characters that could be used for the actual name. | Low readability for large graphs | Planned fix: shorter kind prefix abbreviations (`Dp:`, `Pod:`, `Svc:`, `Ing:`) |
 | 4 | **Canvas vs Mermaid graph quality** | The canvas renderer produces a simpler layout than the Mermaid reference. Complex graphs with many cross-level edges are harder to read in canvas form. Node positioning, subgraph support, and edge routing are more limited. | Cosmetic | Gradual improvement planned |
-| 5 | **Cloud models show `0 t/s`** | Cloud-routed Ollama models do not return per-token timing data. The stats panel shows `0 t/s` which looks like an error but is normal. A UI label now clarifies this. | Cosmetic — labelled in UI |
+| 5 | **Cloud models show `0 t/s`** | OpenAI-compatible cloud endpoints do not return per-token timing data. The stats panel shows `0 t/s` which looks like an error but is normal. A UI label now clarifies this. | Cosmetic — labelled in UI |
+| 6 | **Fidelity eval works only with Ollama** | The fidelity hallucination detector uses a separate AI call internally. On OpenAI-compatible endpoints this call may doesn't work or return unexpected output, producing no score or a misleading result. | WIP — OpenAI-compatible fidelity support planned |
 
 ---
 
@@ -436,6 +459,7 @@ src/
 - [x] Auto container name resolution for `get_pod_logs`
 - [x] Secret/ConfigMap MISSING false-positive fix (`secretsApi` API name)
 - [x] Workload analysis shortcuts — context-menu and detail-drawer buttons for relationship map and resource analysis
+- [x] OpenAI-compatible endpoint support — auto-detection, optional API key, endpoint URL normalisation (works with Ollama, LocalAI, LM Studio, OpenAI, etc.)
 
 ### Planned
 
@@ -465,6 +489,15 @@ pnpm pack          # Pack .tgz for local Freelens installation
 ---
 
 ## Changelog
+
+### v0.4.0
+
+- **OpenAI-compatible endpoint support** — works with Ollama, LocalAI, LM Studio, OpenAI, or any `/v1/chat/completions`-compatible backend
+- **Auto-detection** — plugin probes the endpoint and detects provider automatically; no manual toggle needed
+- **Optional API key** — `Authorization: Bearer` support for endpoints that require authentication
+- **Auth-aware probing** — `401 Unauthorized` on `/v1/models` correctly treated as "endpoint reachable, key required" rather than "not reachable"
+- **Endpoint normalisation** — pasting a full path like `http://host:8080/v1/models` is accepted; suffix stripped to derive the correct base URL
+- **Provider-biased detection** — if endpoint path contains `/v1/`, OpenAI-compatible is probed first; if API key is set, same bias applies (Ollama never requires auth)
 
 ### v0.3.2
 
