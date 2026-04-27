@@ -7,10 +7,9 @@
 
 import { observer } from "mobx-react";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatMessage, FidelityReport, OllamaModelParams, ToolsConfig } from "../../common/types";
+import type { ApiProvider, ChatMessage, FidelityReport, OllamaModelParams, ToolsConfig } from "../../common/types";
 import { DEFAULT_MODEL_PARAMS } from "../../common/types";
 import { ChatStore, type SreModeKey } from "../stores/chat-store";
-import { nodeRequestJson } from "../services/ollama-service";
 import { MarkdownRenderer } from "./markdown-renderer";
 
 const chatStore = ChatStore.getInstance();
@@ -163,6 +162,10 @@ function extractEndpointHost(endpoint: string): string {
   } catch {
     return endpoint.replace(/^https?:\/\//i, "");
   }
+}
+
+function providerLabel(provider: ApiProvider): string {
+  return provider === "ollama" ? "Ollama" : "OpenAI-compatible";
 }
 
 function buildObjectAwarePromptFromUrl(): string | null {
@@ -730,6 +733,8 @@ export const SreChat = observer(function SreChat({ onClose, popup = false }: { o
   const [sourcesAnchor, setSourcesAnchor] = useState<PanelAnchor | null>(null);
   const [toolsAnchor, setToolsAnchor] = useState<PanelAnchor | null>(null);
   const connected = chatStore.isOllamaConnected;
+  const provider = chatStore.apiProvider;
+  const providerName = providerLabel(provider);
   const ctx = chatStore.clusterContext;
   const warnCount = ctx ? ctx.events.filter((ev) => ev.type === "Warning").length : 0;
   const endpointHost = extractEndpointHost(chatStore.ollamaEndpoint);
@@ -817,7 +822,7 @@ export const SreChat = observer(function SreChat({ onClose, popup = false }: { o
           className="sre-toolbar-badge"
           style={S.badge(connected)}
           onClick={toggleConnectionPanel}
-          title="Ollama connection settings"
+          title="Connection settings"
         >
           <span
             style={{
@@ -825,7 +830,7 @@ export const SreChat = observer(function SreChat({ onClose, popup = false }: { o
               animation: connected ? undefined : "k8s-sre-pulse 1.8s infinite",
             }}
           />
-          {connected ? `Ollama · ${endpointHost}` : "Disconnected"}
+          {connected ? `${providerName} · ${endpointHost}` : "Disconnected"}
         </button>
 
         {/* Model select — always visible; disabled + shows last model when disconnected */}
@@ -1048,7 +1053,7 @@ export const SreChat = observer(function SreChat({ onClose, popup = false }: { o
             </p>
             {!connected && (
               <p style={{ ...S.welcomeDesc, color: "#f38ba8" }}>
-                ⚠️ Ollama not connected — click the <strong>Disconnected</strong> badge above to configure
+                ⚠️ {providerName} not connected — click the <strong>Disconnected</strong> badge above to configure
               </p>
             )}
             <div style={S.suggestions}>
@@ -1142,7 +1147,7 @@ export const SreChat = observer(function SreChat({ onClose, popup = false }: { o
               value={input}
               onChange={onTaChange}
               onKeyDown={onKey}
-              placeholder={connected ? "Ask about your cluster… (Shift+Enter for new line)" : "Connect to Ollama first (see Preferences)…"}
+              placeholder={connected ? "Ask about your cluster… (Shift+Enter for new line)" : `Connect to ${providerName} first (see Preferences)…`}
               disabled={!connected}
               rows={1}
             />
@@ -1453,6 +1458,7 @@ const ModelParamsPanel = observer(({ onClose, panelStyle }: { onClose: () => voi
 /* ── Connection panel (inline, same context) ── */
 const ConnectionPanel = observer(({ onClose, panelStyle }: { onClose: () => void; panelStyle: React.CSSProperties }) => {
   const [endpoint, setEndpoint] = useState(chatStore.ollamaEndpoint);
+  const [apiKey, setApiKey] = useState(chatStore.openaiApiKey);
   const [testing, setTesting] = useState(false);
   const [debugInfo, setDebugInfo] = useState("");
   const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
@@ -1463,34 +1469,33 @@ const ConnectionPanel = observer(({ onClose, panelStyle }: { onClose: () => void
     setDebugInfo("Starting connection test…");
     const ep = endpoint.replace(/\/+$/, "");
     chatStore.setEndpoint(ep);
+    chatStore.setOpenAIApiKey(apiKey);
     setEndpoint(ep);
 
-    const url = `${ep}/api/tags`;
-    const logs: string[] = [`Testing: ${url}`];
+    const logs: string[] = ["Testing endpoint with auto-detection…"];
 
     try {
       logs.push("Using Node.js HTTP (bypasses mixed-content)…");
       setDebugInfo(logs.join("\n"));
 
-      const result = await nodeRequestJson(url, 5000);
-      logs.push(`Response status: ${result.status} ok: ${result.ok}`);
-      setDebugInfo(logs.join("\n"));
+      // Let ChatStore/Service detect whether endpoint is Ollama or OpenAI-compatible.
+      await chatStore.checkConnection();
+      const modelList = chatStore.availableModels;
+      const provider = chatStore.apiProvider;
 
-      if (!result.ok) throw new Error(`HTTP ${result.status}`);
+      if (!chatStore.isOllamaConnected) {
+        throw new Error(`Endpoint not reachable as Ollama or OpenAI-compatible API`);
+      }
 
-      const modelList = result.data?.models || [];
+      logs.push(`Detected provider: ${providerLabel(provider)}`);
       logs.push(`✓ Connected. Models: ${modelList.length}`);
       if (modelList.length > 0) {
         logs.push(modelList.map((m: any) => m.name).join(", "));
       } else {
-        logs.push("⚠ No models. Run: ollama pull llama3.2");
+        logs.push("⚠ No models returned by endpoint");
       }
       setDebugInfo(logs.join("\n"));
       setStatus("ok");
-
-      chatStore.isOllamaConnected = true;
-      chatStore.availableModels = modelList;
-      chatStore.error = null;
 
       if (modelList.length > 0 && !modelList.find((m: any) => m.name === chatStore.ollamaModel)) {
         chatStore.setModel(modelList[0].name);
@@ -1498,22 +1503,23 @@ const ConnectionPanel = observer(({ onClose, panelStyle }: { onClose: () => void
     } catch (e: any) {
       logs.push(`✕ FAILED: ${e.message}`);
       logs.push("Hints:");
-      logs.push("- Is Ollama running? (ollama serve)");
-      logs.push("- Remote: set OLLAMA_ORIGINS=* on Ollama host");
-      logs.push("- Remote: set OLLAMA_HOST=0.0.0.0:11434");
+      logs.push("- Verify endpoint is reachable");
+      logs.push("- For Ollama ensure /api/tags is available");
+      logs.push("- For OpenAI-compatible ensure /v1/models is available");
+      logs.push("- If required, set a valid API key");
       setDebugInfo(logs.join("\n"));
       setStatus("error");
     } finally {
       setTesting(false);
     }
-  }, [endpoint]);
+  }, [apiKey, endpoint]);
 
   return (
     <>
       <div style={pS.overlay} onClick={onClose} />
       <div style={panelStyle}>
         <div style={pS.head}>
-          <h4 style={pS.title}>🔌 Ollama Connection</h4>
+          <h4 style={pS.title}>🔌 Model Connection</h4>
           <button style={pS.close} onClick={onClose}>✕</button>
         </div>
 
@@ -1535,6 +1541,27 @@ const ConnectionPanel = observer(({ onClose, panelStyle }: { onClose: () => void
             value={endpoint}
             onChange={(e) => { setEndpoint(e.target.value); chatStore.setEndpoint(e.target.value); }}
             placeholder="http://localhost:11434"
+          />
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          <span style={pS.paramLabel}>API Key (optional)</span>
+          <input
+            style={{
+              padding: "6px 10px",
+              border: "1px solid var(--borderColor, #313244)",
+              borderRadius: "6px",
+              background: "var(--mainBackground, #1e1e2e)",
+              color: "var(--textColorPrimary, #cdd6f4)",
+              fontSize: "12px",
+              outline: "none",
+              width: "100%",
+              boxSizing: "border-box" as const,
+            }}
+            type="password"
+            value={apiKey}
+            onChange={(e) => { setApiKey(e.target.value); chatStore.setOpenAIApiKey(e.target.value); }}
+            placeholder="sk-..."
           />
         </div>
 

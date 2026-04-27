@@ -12,6 +12,7 @@
 import http from "http";
 import https from "https";
 import type {
+  ApiProvider,
   ApiMessage,
   ChatMessage,
   CompressedClusterContext,
@@ -125,10 +126,38 @@ function nodeStreamRequest(
  */
 export async function nodeRequestJson(
   url: string,
-  timeout = 5000,
+  timeoutOrOptions: number | { timeout?: number; method?: string; headers?: Record<string, string> } = 5000,
 ): Promise<{ ok: boolean; status: number; data: any }> {
-  const res = await nodeRequest(url, { method: "GET", timeout });
+  const opts = typeof timeoutOrOptions === "number"
+    ? { method: "GET", timeout: timeoutOrOptions }
+    : {
+      method: timeoutOrOptions.method || "GET",
+      timeout: timeoutOrOptions.timeout ?? 5000,
+      headers: timeoutOrOptions.headers,
+    };
+  const res = await nodeRequest(url, opts);
   return { ok: res.ok, status: res.status, data: res.ok ? JSON.parse(res.body) : null };
+}
+
+interface OpenAIModelInfo {
+  id: string;
+}
+
+interface OpenAIStreamChoiceDelta {
+  content?: string;
+  tool_calls?: Array<{
+    index: number;
+    id?: string;
+    function?: { name?: string; arguments?: string };
+  }>;
+}
+
+interface OpenAIStreamChunk {
+  model?: string;
+  choices?: Array<{
+    delta?: OpenAIStreamChoiceDelta;
+    finish_reason?: string | null;
+  }>;
 }
 
 /* ─── Anomalous pod renderer ─────────────────────────────────────────────── */
@@ -249,6 +278,9 @@ function renderAnomalousPod(p: import("../../common/types").K8sResourceSummary):
 export class OllamaService {
   private endpoint: string;
   private model: string;
+  private provider: ApiProvider;
+  private apiKey: string;
+  private endpointPreference: ApiProvider | null = null;
   private abortController: AbortController | null = null;
   private currentAbort: (() => void) | null = null;
 
@@ -270,17 +302,62 @@ export class OllamaService {
     return Object.keys(opts).length > 0 ? opts : undefined;
   }
 
-  constructor(endpoint?: string, model?: string) {
-    this.endpoint = endpoint || DEFAULT_ENDPOINT;
+  private static detectEndpointPreference(endpoint?: string): ApiProvider | null {
+    const raw = endpoint?.trim().toLowerCase() || "";
+    if (!raw) return null;
+    if (/\/v1(?:\/|$)/.test(raw)) return "openai-compatible";
+    if (/(?:\/api\/tags|\/api\/chat)(?:\/)?$/.test(raw)) return "ollama";
+    return null;
+  }
+
+  private static normaliseEndpoint(endpoint?: string): string {
+    const raw = endpoint?.trim() || DEFAULT_ENDPOINT;
+    const withoutTrailingSlash = raw.replace(/\/+$/, "");
+    const suffixes = [
+      "/v1/models",
+      "/v1/chat/completions",
+      "/v1/completions",
+      "/v1/messages",
+      "/v1/responses",
+      "/v1/embeddings",
+      "/v1/tokenize",
+      "/v1",
+      "/api/tags",
+      "/api/chat",
+    ];
+    const lower = withoutTrailingSlash.toLowerCase();
+    for (const suffix of suffixes) {
+      if (lower.endsWith(suffix)) {
+        const trimmed = withoutTrailingSlash.slice(0, withoutTrailingSlash.length - suffix.length);
+        return trimmed || withoutTrailingSlash;
+      }
+    }
+    return withoutTrailingSlash;
+  }
+
+  constructor(endpoint?: string, model?: string, provider: ApiProvider = "ollama", apiKey = "") {
+    this.endpoint = OllamaService.normaliseEndpoint(endpoint);
     this.model = model || DEFAULT_MODEL;
+    this.provider = provider;
+    this.apiKey = apiKey;
+    this.endpointPreference = OllamaService.detectEndpointPreference(endpoint);
   }
 
   setEndpoint(endpoint: string) {
-    this.endpoint = endpoint;
+    this.endpoint = OllamaService.normaliseEndpoint(endpoint);
+    this.endpointPreference = OllamaService.detectEndpointPreference(endpoint);
   }
 
   setModel(model: string) {
     this.model = model;
+  }
+
+  setProvider(provider: ApiProvider) {
+    this.provider = provider;
+  }
+
+  setApiKey(apiKey: string) {
+    this.apiKey = apiKey;
   }
 
   getEndpoint(): string {
@@ -289,6 +366,113 @@ export class OllamaService {
 
   getModel(): string {
     return this.model;
+  }
+
+  getProvider(): ApiProvider {
+    return this.provider;
+  }
+
+  private isOpenAICompatible(): boolean {
+    return this.provider === "openai-compatible";
+  }
+
+  private buildUrl(path: string): string {
+    return `${this.endpoint.replace(/\/+$/, "")}${path}`;
+  }
+
+  private buildHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.isOpenAICompatible() && this.apiKey.trim()) {
+      headers.Authorization = `Bearer ${this.apiKey.trim()}`;
+    }
+    return headers;
+  }
+
+  private headersForProvider(provider: ApiProvider): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (provider === "openai-compatible" && this.apiKey.trim()) {
+      headers.Authorization = `Bearer ${this.apiKey.trim()}`;
+    }
+    return headers;
+  }
+
+  private async probeProvider(provider: ApiProvider): Promise<boolean> {
+    const url = provider === "openai-compatible" ? this.buildUrl("/v1/models") : this.buildUrl("/api/tags");
+    try {
+      const res = await nodeRequest(url, {
+        method: "GET",
+        timeout: 4000,
+        headers: this.headersForProvider(provider),
+      });
+      // 401 means the endpoint is reachable and speaks the expected API — it just requires auth.
+      return res.ok || res.status === 401;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Auto-detect provider from endpoint by probing both API shapes. */
+  async detectProvider(): Promise<ApiProvider | null> {
+    const preferred: ApiProvider[] = this.endpointPreference
+      ? [this.endpointPreference, this.endpointPreference === "ollama" ? "openai-compatible" : "ollama"]
+      : this.apiKey
+        ? ["openai-compatible", "ollama"]
+        : this.provider === "ollama"
+          ? ["ollama", "openai-compatible"]
+          : ["openai-compatible", "ollama"];
+
+    for (const p of preferred) {
+      if (await this.probeProvider(p)) {
+        this.provider = p;
+        return p;
+      }
+    }
+    return null;
+  }
+
+  private buildOpenAIRequest(
+    messages: ApiMessage[],
+    stream: boolean,
+    modelParams?: OllamaModelParams,
+    tools?: OllamaTool[],
+  ): Record<string, any> {
+    const opts = OllamaService.sanitiseOptions(modelParams);
+    const payload: Record<string, any> = {
+      model: this.model,
+      stream,
+      messages: messages.map((m) => {
+        if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+          return {
+            role: "assistant",
+            content: m.content || "",
+            tool_calls: m.tool_calls.map((tc, idx) => ({
+              id: tc.id || `tool_${idx}_${Date.now()}`,
+              type: "function",
+              function: {
+                name: tc.function.name,
+                arguments: JSON.stringify(tc.function.arguments ?? {}),
+              },
+            })),
+          };
+        }
+        if (m.role === "tool") {
+          return {
+            role: "tool",
+            content: m.content,
+            tool_call_id: m.tool_call_id || "tool_missing_id",
+          };
+        }
+        return { role: m.role, content: m.content };
+      }),
+    };
+
+    if (opts?.temperature != null) payload.temperature = opts.temperature;
+    if (opts?.top_p != null) payload.top_p = opts.top_p;
+    if (opts?.num_predict != null && opts.num_predict > 0) payload.max_tokens = opts.num_predict;
+    if (opts?.repeat_penalty != null) payload.presence_penalty = Math.max(0, opts.repeat_penalty - 1);
+    if (tools && tools.length > 0) payload.tools = tools;
+
+    return payload;
   }
 
   /** Parse performance stats from the final Ollama streaming chunk. */
@@ -318,28 +502,33 @@ export class OllamaService {
    * Check if Ollama is reachable (uses Node.js http — no mixed-content issues)
    */
   async isAvailable(): Promise<boolean> {
-    const url = `${this.endpoint}/api/tags`;
-    console.log("[K8s SRE] Testing connection to:", url);
-    try {
-      const res = await nodeRequest(url, { method: "GET", timeout: 5000 });
-      console.log("[K8s SRE] Connection response status:", res.status);
-      return res.ok;
-    } catch (err) {
-      console.warn("[K8s SRE] Connection failed:", err);
-      return false;
-    }
+    const detected = await this.detectProvider();
+    console.log("[K8s SRE] Provider detection:", detected ?? "none");
+    return detected !== null;
   }
 
   /**
    * List available models (uses Node.js http — no mixed-content issues)
    */
   async listModels(): Promise<OllamaModelInfo[]> {
-    const url = `${this.endpoint}/api/tags`;
+    const provider = this.provider;
+    console.log("[K8s SRE] listModels using provider:", provider);
+    const url = provider === "openai-compatible" ? this.buildUrl("/v1/models") : this.buildUrl("/api/tags");
     console.log("[K8s SRE] Fetching models from:", url);
     try {
-      const res = await nodeRequest(url, { method: "GET", timeout: 10000 });
+      const res = await nodeRequest(url, { method: "GET", timeout: 10000, headers: this.headersForProvider(provider) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = JSON.parse(res.body);
+      if (provider === "openai-compatible") {
+        const models = (data?.data ?? []).map((m: OpenAIModelInfo) => ({
+          name: m.id,
+          size: 0,
+          digest: "",
+          modified_at: "",
+        }));
+        console.log("[K8s SRE] OpenAI-compatible models:", JSON.stringify(models.map((m: OllamaModelInfo) => m.name)));
+        return models;
+      }
       console.log("[K8s SRE] Models response:", JSON.stringify(data?.models?.map((m: any) => m.name)));
       return data?.models || [];
     } catch (error) {
@@ -525,18 +714,33 @@ RULES:
    * conversation history.  Returns the model's text response.
    */
   async generateText(prompt: string): Promise<string> {
+    const options: OllamaModelParams = { temperature: 0.3, top_p: 0.9, top_k: 40, num_predict: 512, repeat_penalty: 1.0 };
+
+    console.log("[K8s SRE] generateText (summary) →", `model=${this.model}`, `prompt=${prompt.length} chars`);
+
+    if (this.isOpenAICompatible()) {
+      const request = this.buildOpenAIRequest([{ role: "user", content: prompt }], false, options);
+      const res = await nodeRequest(this.buildUrl("/v1/chat/completions"), {
+        method: "POST",
+        headers: this.buildHeaders(),
+        body: JSON.stringify(request),
+        timeout: 60_000,
+      });
+      if (!res.ok) throw new Error(`OpenAI-compatible API error: HTTP ${res.status}`);
+      const data = JSON.parse(res.body);
+      return data?.choices?.[0]?.message?.content || "";
+    }
+
     const request: OllamaChatRequest = {
       model: this.model,
       messages: [{ role: "user", content: prompt }],
       stream: false,
-      options: { temperature: 0.3, top_p: 0.9, top_k: 40, num_predict: 512, repeat_penalty: 1.0 },
+      options: OllamaService.sanitiseOptions(options),
     };
 
-    console.log("[K8s SRE] generateText (summary) →", `model=${this.model}`, `prompt=${prompt.length} chars`);
-
-    const res = await nodeRequest(`${this.endpoint}/api/chat`, {
+    const res = await nodeRequest(this.buildUrl("/api/chat"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.buildHeaders(),
       body: JSON.stringify(request),
       timeout: 60_000,
     });
@@ -557,8 +761,6 @@ RULES:
     clusterContext?: CompressedClusterContext,
     modelParams?: OllamaModelParams,
   ): AsyncGenerator<string, void, unknown> {
-    this.abortController = new AbortController();
-
     const systemPrompt = this.buildSystemPrompt(clusterContext);
 
     const apiMessages = [
@@ -569,80 +771,7 @@ RULES:
       })),
     ];
 
-    const options = OllamaService.sanitiseOptions(modelParams);
-
-    const request: OllamaChatRequest = {
-      model: this.model,
-      messages: apiMessages,
-      stream: true,
-      ...(options ? { options } : {}),
-    };
-
-    console.log("[K8s SRE] streamChat request →", JSON.stringify({
-      model: request.model,
-      options: request.options,
-      messagesCount: request.messages.length,
-      systemPromptLength: systemPrompt.length,
-      hasClusterContext: !!clusterContext,
-      viewMode: clusterContext?.viewMode ?? "none",
-    }));
-
-    const body = JSON.stringify(request);
-    const { response, abort } = nodeStreamRequest(`${this.endpoint}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-      timeout: 300_000,
-    });
-
-    this.currentAbort = abort;
-
-    try {
-      const { stream } = await response;
-
-      let buffer = "";
-
-      for await (const rawChunk of stream) {
-        buffer += rawChunk;
-
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const chunk: OllamaStreamChunk = JSON.parse(line);
-            if (chunk.message?.content) {
-              yield chunk.message.content;
-            }
-            if (chunk.done) return;
-          } catch {
-            // skip malformed JSON lines
-          }
-        }
-      }
-
-      // Process remaining buffer
-      if (buffer.trim()) {
-        try {
-          const chunk: OllamaStreamChunk = JSON.parse(buffer);
-          if (chunk.message?.content) {
-            yield chunk.message.content;
-          }
-        } catch {
-          // ignore
-        }
-      }
-    } catch (error: any) {
-      if (error.name === "AbortError" || error.message?.includes("aborted") || error.message?.includes("destroyed")) {
-        yield "\n\n*[Response interrupted]*";
-        return;
-      }
-      throw error;
-    } finally {
-      this.abortController = null;
-      this.currentAbort = null;
-    }
+    yield* this.streamChatAssembled(apiMessages, modelParams);
   }
 
   /**
@@ -663,26 +792,31 @@ RULES:
       })),
     ];
 
-    const options = OllamaService.sanitiseOptions(modelParams);
-
-    const request: OllamaChatRequest = {
-      model: this.model,
-      messages: apiMessages,
-      stream: false,
-      ...(options ? { options } : {}),
-    };
-
-    const res = await nodeRequest(`${this.endpoint}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
-    });
+    const res = this.isOpenAICompatible()
+      ? await nodeRequest(this.buildUrl("/v1/chat/completions"), {
+        method: "POST",
+        headers: this.buildHeaders(),
+        body: JSON.stringify(this.buildOpenAIRequest(apiMessages, false, modelParams)),
+      })
+      : await nodeRequest(this.buildUrl("/api/chat"), {
+        method: "POST",
+        headers: this.buildHeaders(),
+        body: JSON.stringify({
+          model: this.model,
+          messages: apiMessages,
+          stream: false,
+          ...(OllamaService.sanitiseOptions(modelParams) ? { options: OllamaService.sanitiseOptions(modelParams) } : {}),
+        } as OllamaChatRequest),
+      });
 
     if (!res.ok) {
-      throw new Error(`Ollama API error: HTTP ${res.status}`);
+      throw new Error(`Chat API error: HTTP ${res.status}`);
     }
 
     const data = JSON.parse(res.body);
+    if (this.isOpenAICompatible()) {
+      return data?.choices?.[0]?.message?.content || "";
+    }
     return data.message?.content || "";
   }
 
@@ -708,24 +842,26 @@ RULES:
     this.lastStats = null;
 
     const options = OllamaService.sanitiseOptions(modelParams);
-
-    const request: OllamaChatRequest = {
-      model: this.model,
-      messages: assembledMessages,
-      stream: true,
-      ...(options ? { options } : {}),
-    };
+    const request = this.isOpenAICompatible()
+      ? this.buildOpenAIRequest(assembledMessages, true, modelParams)
+      : {
+        model: this.model,
+        messages: assembledMessages,
+        stream: true,
+        ...(options ? { options } : {}),
+      };
 
     console.log("[K8s SRE] streamChatAssembled →", JSON.stringify({
-      model: request.model,
-      messagesCount: request.messages.length,
-      totalChars: request.messages.reduce((s, m) => s + m.content.length, 0),
+      model: this.model,
+      messagesCount: assembledMessages.length,
+      totalChars: assembledMessages.reduce((s, m) => s + m.content.length, 0),
+      provider: this.provider,
     }));
 
     const body = JSON.stringify(request);
-    const { response, abort } = nodeStreamRequest(`${this.endpoint}/api/chat`, {
+    const { response, abort } = nodeStreamRequest(this.isOpenAICompatible() ? this.buildUrl("/v1/chat/completions") : this.buildUrl("/api/chat"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.buildHeaders(),
       body,
       timeout: 300_000,
     });
@@ -738,20 +874,37 @@ RULES:
 
       for await (const rawChunk of stream) {
         buffer += rawChunk;
-        const lines = buffer.split("\n");
+        const lines = this.isOpenAICompatible() ? buffer.split("\n\n") : buffer.split("\n");
         buffer = lines.pop() || "";
 
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
-            const chunk: OllamaStreamChunk = JSON.parse(line);
-            if (chunk.message?.content) yield chunk.message.content;
-            if (chunk.done) {
-              this.lastStats = this.parseStats(chunk);
-              if (this.lastStats) {
-                console.log("[K8s SRE] Performance →", JSON.stringify(this.lastStats));
+            if (this.isOpenAICompatible()) {
+              const dataLine = line
+                .split("\n")
+                .map((l) => l.trim())
+                .find((l) => l.startsWith("data:"));
+              if (!dataLine) continue;
+              const payload = dataLine.slice(5).trim();
+              if (payload === "[DONE]") return;
+              const chunk: OpenAIStreamChunk = JSON.parse(payload);
+              const choice = chunk.choices?.[0];
+              const delta = choice?.delta;
+              if (delta?.content) yield delta.content;
+              if (choice?.finish_reason) {
+                return;
               }
-              return;
+            } else {
+              const chunk: OllamaStreamChunk = JSON.parse(line);
+              if (chunk.message?.content) yield chunk.message.content;
+              if (chunk.done) {
+                this.lastStats = this.parseStats(chunk);
+                if (this.lastStats) {
+                  console.log("[K8s SRE] Performance →", JSON.stringify(this.lastStats));
+                }
+                return;
+              }
             }
           } catch { /* skip malformed */ }
         }
@@ -759,10 +912,12 @@ RULES:
 
       if (buffer.trim()) {
         try {
-          const chunk: OllamaStreamChunk = JSON.parse(buffer);
-          if (chunk.message?.content) yield chunk.message.content;
-          if (chunk.done) {
-            this.lastStats = this.parseStats(chunk);
+          if (!this.isOpenAICompatible()) {
+            const chunk: OllamaStreamChunk = JSON.parse(buffer);
+            if (chunk.message?.content) yield chunk.message.content;
+            if (chunk.done) {
+              this.lastStats = this.parseStats(chunk);
+            }
           }
         } catch { /* ignore */ }
       }
@@ -810,23 +965,26 @@ RULES:
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const options = OllamaService.sanitiseOptions(modelParams);
-      const request: OllamaChatRequest = {
-        model: this.model,
-        messages,
-        stream: true,
-        tools,
-        ...(options ? { options } : {}),
-      };
+      const request = this.isOpenAICompatible()
+        ? this.buildOpenAIRequest(messages, true, modelParams, tools)
+        : {
+          model: this.model,
+          messages,
+          stream: true,
+          tools,
+          ...(options ? { options } : {}),
+        };
 
       console.log("[K8s SRE] streamChatWithTools round", round, "→", JSON.stringify({
-        model: request.model,
-        messagesCount: request.messages.length,
+        model: this.model,
+        messagesCount: messages.length,
         tools: tools.map((t) => t.function.name),
+        provider: this.provider,
       }));
 
-      const { response, abort } = nodeStreamRequest(`${this.endpoint}/api/chat`, {
+      const { response, abort } = nodeStreamRequest(this.isOpenAICompatible() ? this.buildUrl("/v1/chat/completions") : this.buildUrl("/api/chat"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: this.buildHeaders(),
         body: JSON.stringify(request),
         timeout: 300_000,
       });
@@ -836,6 +994,7 @@ RULES:
       // Ollama emits tool_calls on a non-done intermediate chunk, not the done chunk.
       // Accumulate from any chunk so we never miss them.
       let pendingToolCalls: OllamaToolCall[] = [];
+      const openAIToolCalls = new Map<number, { id?: string; name?: string; args: string }>();
 
       const processChunk = (chunk: OllamaStreamChunk) => {
         if (chunk.message?.content) return chunk.message.content;
@@ -851,20 +1010,50 @@ RULES:
 
         for await (const rawChunk of stream) {
           buffer += rawChunk;
-          const lines = buffer.split("\n");
+          const lines = this.isOpenAICompatible() ? buffer.split("\n\n") : buffer.split("\n");
           buffer = lines.pop() || "";
 
           for (const line of lines) {
             if (!line.trim()) continue;
             try {
-              const chunk: OllamaStreamChunk = JSON.parse(line);
-              const text = processChunk(chunk);
-              if (text) yield text;
-              if (chunk.done) {
-                doneChunk = chunk;
-                this.lastStats = this.parseStats(chunk);
-                if (this.lastStats) {
-                  console.log("[K8s SRE] Perf (tools round", round, ")→", JSON.stringify(this.lastStats));
+              if (this.isOpenAICompatible()) {
+                const dataLine = line
+                  .split("\n")
+                  .map((l) => l.trim())
+                  .find((l) => l.startsWith("data:"));
+                if (!dataLine) continue;
+                const payload = dataLine.slice(5).trim();
+                if (payload === "[DONE]") continue;
+                const chunk: OpenAIStreamChunk = JSON.parse(payload);
+                const choice = chunk.choices?.[0];
+                const delta = choice?.delta;
+                if (delta?.content) yield delta.content;
+                if (delta?.tool_calls?.length) {
+                  for (const tc of delta.tool_calls) {
+                    const entry = openAIToolCalls.get(tc.index) || { args: "" };
+                    if (tc.id) entry.id = tc.id;
+                    if (tc.function?.name) entry.name = tc.function.name;
+                    if (tc.function?.arguments) entry.args += tc.function.arguments;
+                    openAIToolCalls.set(tc.index, entry);
+                  }
+                }
+                if (choice?.finish_reason) {
+                  doneChunk = {
+                    model: chunk.model || this.model,
+                    message: { role: "assistant", content: "" },
+                    done: true,
+                  };
+                }
+              } else {
+                const chunk: OllamaStreamChunk = JSON.parse(line);
+                const text = processChunk(chunk);
+                if (text) yield text;
+                if (chunk.done) {
+                  doneChunk = chunk;
+                  this.lastStats = this.parseStats(chunk);
+                  if (this.lastStats) {
+                    console.log("[K8s SRE] Perf (tools round", round, ")→", JSON.stringify(this.lastStats));
+                  }
                 }
               }
             } catch { /* skip malformed */ }
@@ -873,12 +1062,14 @@ RULES:
 
         if (buffer.trim()) {
           try {
-            const chunk: OllamaStreamChunk = JSON.parse(buffer);
-            const text = processChunk(chunk);
-            if (text) yield text;
-            if (chunk.done) {
-              doneChunk = chunk;
-              this.lastStats = this.parseStats(chunk);
+            if (!this.isOpenAICompatible()) {
+              const chunk: OllamaStreamChunk = JSON.parse(buffer);
+              const text = processChunk(chunk);
+              if (text) yield text;
+              if (chunk.done) {
+                doneChunk = chunk;
+                this.lastStats = this.parseStats(chunk);
+              }
             }
           } catch { /* ignore */ }
         }
@@ -898,7 +1089,23 @@ RULES:
       // Prefer accumulated tool_calls; fall back to done-chunk field for models
       // that do include them there.
       const toolCalls: OllamaToolCall[] =
-        pendingToolCalls.length > 0
+        this.isOpenAICompatible()
+          ? [...openAIToolCalls.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([, tc]) => ({
+              id: tc.id,
+              function: {
+                name: tc.name || "unknown_tool",
+                arguments: (() => {
+                  try {
+                    return tc.args ? JSON.parse(tc.args) : {};
+                  } catch {
+                    return {};
+                  }
+                })(),
+              },
+            }))
+          : pendingToolCalls.length > 0
           ? pendingToolCalls
           : (doneChunk?.message?.tool_calls ?? []);
 
@@ -921,7 +1128,7 @@ RULES:
 
         const result = await executeToolFn(toolName, toolArgs, liveCtx);
         console.log("[K8s SRE] Tool", toolName, "→", result.length, "chars");
-        messages.push({ role: "tool", content: result });
+        messages.push({ role: "tool", content: result, ...(tc.id ? { tool_call_id: tc.id } : {}) });
       }
       // Loop: next round sends the enriched thread back to the model.
     }

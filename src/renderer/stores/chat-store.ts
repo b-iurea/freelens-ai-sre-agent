@@ -6,7 +6,7 @@
  */
 
 import { action, computed, makeObservable, observable, runInAction } from "mobx";
-import type { ChatMessage, ClusterContext, FidelityReport, OllamaModelInfo, OllamaModelParams, OllamaPerformanceStats, ToolApprovalState, ToolsConfig } from "../../common/types";
+import type { ApiProvider, ChatMessage, ClusterContext, FidelityReport, OllamaModelInfo, OllamaModelParams, OllamaPerformanceStats, ToolApprovalState, ToolsConfig } from "../../common/types";
 import { DEFAULT_MODEL_PARAMS, DEFAULT_TOOLS_CONFIG } from "../../common/types";
 import { K8sContextService } from "../services/k8s-context-service";
 import { OllamaService } from "../services/ollama-service";
@@ -80,6 +80,8 @@ const SETTINGS_KEY = "k8s-sre-assistant-settings";
 interface PersistedSettings {
   ollamaEndpoint: string;
   ollamaModel: string;
+  apiProvider?: ApiProvider;
+  openaiApiKey?: string;
   autoRefreshContext: boolean;
   modelParams?: OllamaModelParams;
   selectedNamespace?: string;
@@ -165,6 +167,8 @@ export class ChatStore {
   error: string | null = null;
   ollamaEndpoint = "http://localhost:11434";
   ollamaModel = "qwen3.5:cloud"; 
+  apiProvider: ApiProvider = "ollama";
+  openaiApiKey = "";
   availableModels: OllamaModelInfo[] = [];
   isOllamaConnected = false;
   clusterContext: ClusterContext | null = null;
@@ -206,6 +210,8 @@ export class ChatStore {
       error: observable,
       ollamaEndpoint: observable,
       ollamaModel: observable,
+      apiProvider: observable,
+      openaiApiKey: observable,
       availableModels: observable,
       isOllamaConnected: observable,
       clusterContext: observable,
@@ -225,6 +231,8 @@ export class ChatStore {
       lastMessage: computed,
       setEndpoint: action,
       setModel: action,
+      setApiProvider: action,
+      setOpenAIApiKey: action,
       setAutoRefreshContext: action,
       setModelParams: action,
       setSelectedNamespace: action,
@@ -247,7 +255,7 @@ export class ChatStore {
     });
 
     this.loadSettings();
-    this.ollamaService = new OllamaService(this.ollamaEndpoint, this.ollamaModel);
+    this.ollamaService = new OllamaService(this.ollamaEndpoint, this.ollamaModel, this.apiProvider, this.openaiApiKey);
     this.chunkManager = new ChunkManager();
     this.summaryManager = new SummaryManager();
     // Wire SummaryManager to call Ollama for compression
@@ -275,6 +283,8 @@ export class ChatStore {
         const s: PersistedSettings = JSON.parse(raw);
         if (s.ollamaEndpoint) this.ollamaEndpoint = s.ollamaEndpoint;
         if (s.ollamaModel) this.ollamaModel = s.ollamaModel;
+        if (s.apiProvider) this.apiProvider = s.apiProvider;
+        if (typeof s.openaiApiKey === "string") this.openaiApiKey = s.openaiApiKey;
         if (typeof s.autoRefreshContext === "boolean") this.autoRefreshContext = s.autoRefreshContext;
         if (s.modelParams) this.modelParams = { ...DEFAULT_MODEL_PARAMS, ...s.modelParams };
         if (s.selectedNamespace) this.selectedNamespace = s.selectedNamespace;
@@ -297,6 +307,8 @@ export class ChatStore {
       const s: PersistedSettings = {
         ollamaEndpoint: this.ollamaEndpoint,
         ollamaModel: this.ollamaModel,
+        apiProvider: this.apiProvider,
+        openaiApiKey: this.openaiApiKey,
         autoRefreshContext: this.autoRefreshContext,
         modelParams: this.modelParams,
         selectedNamespace: this.selectedNamespace,
@@ -325,6 +337,14 @@ export class ChatStore {
       if (s.ollamaModel && s.ollamaModel !== this.ollamaModel) {
         this.ollamaModel = s.ollamaModel;
         this.ollamaService.setModel(s.ollamaModel);
+      }
+      if (s.apiProvider && s.apiProvider !== this.apiProvider) {
+        this.apiProvider = s.apiProvider;
+        this.ollamaService.setProvider(s.apiProvider);
+      }
+      if (typeof s.openaiApiKey === "string" && s.openaiApiKey !== this.openaiApiKey) {
+        this.openaiApiKey = s.openaiApiKey;
+        this.ollamaService.setApiKey(s.openaiApiKey);
       }
       if (typeof s.autoRefreshContext === "boolean") {
         this.autoRefreshContext = s.autoRefreshContext;
@@ -437,6 +457,18 @@ export class ChatStore {
   setModel(model: string) {
     this.ollamaModel = model;
     this.ollamaService.setModel(model);
+    this.saveSettings();
+  }
+
+  setApiProvider(provider: ApiProvider) {
+    this.apiProvider = provider;
+    this.ollamaService.setProvider(provider);
+    this.saveSettings();
+  }
+
+  setOpenAIApiKey(apiKey: string) {
+    this.openaiApiKey = apiKey;
+    this.ollamaService.setApiKey(apiKey);
     this.saveSettings();
   }
 
@@ -602,14 +634,17 @@ export class ChatStore {
     this.syncSettings();
     try {
       const connected = await this.ollamaService.isAvailable();
+      const detectedProvider = this.ollamaService.getProvider();
       const models = connected ? await this.ollamaService.listModels() : [];
       runInAction(() => {
+        this.apiProvider = detectedProvider;
         this.isOllamaConnected = connected;
         if (connected) {
           this.availableModels = models;
           this.error = null;
         } else {
-          this.error = "Cannot connect to Ollama. Make sure it's running on " + this.ollamaEndpoint;
+          const providerName = this.apiProvider === "ollama" ? "Ollama" : "OpenAI-compatible endpoint";
+          this.error = `Cannot connect to ${providerName}. Check endpoint: ${this.ollamaEndpoint}`;
           this.availableModels = [];
         }
       });
@@ -929,6 +964,8 @@ export class ChatStore {
         {
           endpoint: this.ollamaEndpoint,
           model: this.ollamaModel,
+          provider: this.apiProvider,
+          apiKey: this.openaiApiKey,
           // Pass all known resource names directly from the structured context —
           // avoids regex extraction noise and slice cutoffs.
           knownResourceNames: [
