@@ -439,6 +439,7 @@ src/
 
 ### Planned
 
+- [ ] **SRE Diagnose session** — SRE Diagnose has separate session, saved and retrievable from Diagnose History Liste
 - [ ] **Canvas graph node abbreviations** — shorter kind prefixes (`Dp:`, `Svc:`, `Ing:`) to expose more of the resource name in fixed-width nodes
 - [ ] **Canvas graph layout improvements** — better edge routing, subgraph support, reduced cross-level edge crossings
 - [ ] **Fidelity score rework** — more reliable hallucination detection across model sizes

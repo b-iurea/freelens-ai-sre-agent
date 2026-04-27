@@ -100,7 +100,7 @@ function parseMermaidGraph(src: string): { nodes: Map<string, GNode>; edges: GEd
   const lines = src.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("%%"));
   if (!lines.length) return null;
 
-  const header = lines[0].match(/^graph\s+(TD|LR|BT|RL|TB)\b/i);
+  const header = lines[0].match(/^(?:graph|flowchart)\s+(TD|LR|BT|RL|TB)\b/i);
   if (!header) return null;
   const rawDir = header[1].toUpperCase();
   const isLR = rawDir === "LR" || rawDir === "RL";
@@ -108,7 +108,14 @@ function parseMermaidGraph(src: string): { nodes: Map<string, GNode>; edges: GEd
   const nodes = new Map<string, GNode>();
   const edges: GEdge[] = [];
 
-  const strip = (s?: string) => s?.replace(/^[\[({>]|[\])}]$/g, "").trim();
+  // Strip bracket wrappers, surrounding quotes, HTML tags (<br/>, etc.)
+  const strip = (s?: string) =>
+    s?.replace(/^[\[({>]/g, "")
+      .replace(/[\])}]$/g, "")
+      .replace(/^"|"$/g, "")
+      .replace(/<br\s*\/?>/gi, " · ")
+      .replace(/<[^>]+>/g, "")
+      .trim();
   const ensure = (id: string, lbl?: string) => {
     if (!nodes.has(id)) nodes.set(id, { id, label: lbl ?? id });
     else if (lbl) nodes.get(id)!.label = lbl;
@@ -307,7 +314,8 @@ function paintGraph(canvas: HTMLCanvasElement, layout: GraphLayout) {
 
     c.font = "11px 'JetBrains Mono',Menlo,monospace";
     c.fillStyle = "#cdd6f4";
-    let lbl = n.label;
+    // Strip Kind/ prefix — the node color already conveys the resource kind
+    let lbl = n.label.replace(/^[A-Za-z]+\//, "");
     const maxW = n.w - 14;
     while (c.measureText(lbl).width > maxW && lbl.length > 2) lbl = lbl.slice(0, -1);
     if (lbl.length < n.label.length) lbl = lbl.slice(0, -1) + "…";
@@ -382,6 +390,24 @@ function MermaidBlock({ source }: { source: string }) {
       {/* inline canvas — scrollable if graph is wider than the chat panel */}
       <div style={{ overflow: "auto", borderRadius: 8, border: "1px solid var(--borderColor,#313244)" }}>
         <canvas ref={canvasRef} style={{ display: "block" }} />
+      </div>
+      {/* legend */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", padding: "6px 2px 0", fontSize: "10px", color: "#a6adc8" }}>
+        {([
+          ["Pod",          "#a6e3a1", "rgba(166,227,161,.18)"],
+          ["Deploy / SS / DS", "#89dceb", "rgba(137,220,235,.18)"],
+          ["Service",      "#89b4fa", "rgba(137,180,250,.18)"],
+          ["Ingress",      "#cba6f7", "rgba(203,166,247,.18)"],
+          ["ConfigMap",    "#f9e2af", "rgba(249,226,175,.18)"],
+          ["Secret",       "#fab387", "rgba(250,179,135,.18)"],
+          ["PVC / Volume", "#f38ba8", "rgba(243,139,168,.18)"],
+          ["HPA / Node",   "#94e2d5", "rgba(148,226,213,.18)"],
+        ] as Array<[string, string, string]>).map(([name, stroke, fill]) => (
+          <span key={name} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: fill, border: `1px solid ${stroke}`, flexShrink: 0 }} />
+            {name}
+          </span>
+        ))}
       </div>
       {/* expand modal */}
       {expanded && (

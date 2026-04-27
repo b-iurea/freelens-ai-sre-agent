@@ -209,6 +209,19 @@ function renderAnomalousPod(p: import("../../common/types").K8sResourceSummary):
     out += `    → volumes:   ${volParts.join("  ")}\n`;
   }
 
+  // Present env/envFrom/imagePullSecret refs — Secrets and ConfigMaps that exist
+  const envPresent = rel.presentRefs.filter((r) => r.refType !== "volume");
+  if (envPresent.length > 0) {
+    const grouped = new Map<string, string[]>();
+    for (const r of envPresent) {
+      if (!grouped.has(r.kind)) grouped.set(r.kind, []);
+      grouped.get(r.kind)!.push(r.name);
+    }
+    for (const [kind, names] of grouped) {
+      out += `    → ${kind.toLowerCase()}s: ${names.join("  ")} ✓\n`;
+    }
+  }
+
   // Missing env/envFrom/imagePullSecret refs
   const envMissing = rel.missingRefs.filter((r) => r.refType !== "volume" && r.refType !== "ingressTLS");
   if (envMissing.length > 0) {
@@ -227,7 +240,7 @@ function renderAnomalousPod(p: import("../../common/types").K8sResourceSummary):
   // Services
   if (rel.serviceEndpoints && rel.serviceEndpoints.length > 0) {
     for (const s of rel.serviceEndpoints) {
-      out += `    → service:   ${s.serviceName} → ${s.endpointCount === 0 ? "0 endpoints ⚠" : `${s.endpointCount} endpoints`}\n`;
+      out += `    → service:   ${s.serviceName} ✓ (selector matches pod)\n`;
     }
   }
 

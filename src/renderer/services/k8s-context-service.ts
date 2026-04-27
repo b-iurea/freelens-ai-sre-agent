@@ -499,9 +499,18 @@ export const rawResourceCache: {
   daemonSets:   any[] | null;
   jobs:         any[] | null;
   cronJobs:     any[] | null;
+  /** Raw deployment objects — used by on-the-fly relation resolution for healthy pods. */
+  deployments:  any[] | null;
+  /** Raw service objects — used by on-the-fly relation resolution for healthy pods. */
+  services:     any[] | null;
+  /** Raw HPA objects — used by on-the-fly relation resolution for healthy pods. */
+  hpas:         any[] | null;
+  /** Raw pod objects keyed by "namespace/name" — used by on-the-fly relation resolution. */
+  pods:         Map<string, any>;
 } = {
   secrets: null, configMaps: null, ingresses: null, pvcs: null,
   statefulSets: null, daemonSets: null, jobs: null, cronJobs: null,
+  deployments: null, services: null, hpas: null, pods: new Map(),
 };
 
 export class K8sContextService {
@@ -579,6 +588,9 @@ export class K8sContextService {
     rawResourceCache.daemonSets   = rawDaemonSets;
     rawResourceCache.jobs         = rawJobs;
     rawResourceCache.cronJobs     = rawCronJobs;
+    rawResourceCache.deployments  = rawDeployments;
+    rawResourceCache.services     = rawServices;
+    rawResourceCache.hpas         = rawHpas;
 
     // Build lookup sets for Secret/ConfigMap existence checks (namespace/name keys).
     // KubeObjects expose namespace/name via getNs()/getName(); metadata fields may be
@@ -611,6 +623,13 @@ export class K8sContextService {
       }
       if (pods?.length) {
         console.log("[K8s SRE] Pods: total", pods.length, filterNamespace ? `(ns=${filterNamespace})` : "(all)");
+        // Cache raw pods keyed by "namespace/name" for on-the-fly relation resolution
+        rawResourceCache.pods.clear();
+        for (const pod of pods) {
+          const podNs  = pod.getNs?.()   ?? pod.metadata?.namespace ?? filterNamespace ?? "default";
+          const podNm  = pod.getName?.() ?? pod.metadata?.name      ?? "unknown";
+          rawResourceCache.pods.set(`${podNs}/${podNm}`, pod);
+        }
         context.pods = sortPodsByAnomaly(pods).map((pod: any) => {
           const meta = pod.metadata ?? pod;
           const status: string = pod.getStatusMessage?.() ?? pod.status?.phase ?? "Unknown";

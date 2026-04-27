@@ -18,7 +18,7 @@ import type {
   OllamaTool,
 } from "../../../common/types";
 import { groupEventsByReason } from "./k8s-compressor";
-import { fetchPodLogs, rawResourceCache } from "../k8s-context-service";
+import { fetchPodLogs, rawResourceCache, resolveRelations } from "../k8s-context-service";
 
 /* ─── Tool schema definitions ───────────────────────────────────────────── */
 
@@ -423,10 +423,46 @@ function execGetResourceChain(name: string, namespace: string, ctx: ClusterConte
     }
   }
 
-  const rel = pod.relations;
+  let rel = pod.relations;
   if (!rel) {
-    out += `\n  (relationship data not available — context may be stale)\n`;
-    return out;
+    // Healthy pods skip resolveRelations() at gather time to save tokens.
+    // Compute it on-the-fly from the cached raw resources when explicitly requested.
+    const rawPod = rawResourceCache.pods.get(`${namespace}/${name}`);
+    if (
+      rawPod &&
+      rawResourceCache.deployments &&
+      rawResourceCache.services
+    ) {
+      const nsDefault = namespace;
+      const secretNames = new Set<string>(
+        (rawResourceCache.secrets ?? []).map((s: any) => {
+          const ns = s.getNs?.() ?? s.metadata?.namespace ?? s.namespace ?? nsDefault;
+          const n  = s.getName?.() ?? s.metadata?.name ?? s.name ?? "";
+          return `${ns}/${n}`;
+        }),
+      );
+      const configMapNames = new Set<string>(
+        (rawResourceCache.configMaps ?? []).map((c: any) => {
+          const ns = c.getNs?.() ?? c.metadata?.namespace ?? c.namespace ?? nsDefault;
+          const n  = c.getName?.() ?? c.metadata?.name ?? c.name ?? "";
+          return `${ns}/${n}`;
+        }),
+      );
+      rel = resolveRelations(
+        rawPod,
+        rawResourceCache.deployments,
+        rawResourceCache.services,
+        rawResourceCache.ingresses ?? [],
+        rawResourceCache.hpas ?? [],
+        rawResourceCache.pvcs ?? [],
+        secretNames,
+        configMapNames,
+        namespace,
+      );
+    } else {
+      out += `\n  (relationship data not available — context may be stale)\n`;
+      return out;
+    }
   }
 
   // Owner controller
@@ -475,7 +511,7 @@ function execGetResourceChain(name: string, namespace: string, ctx: ClusterConte
   if (rel.serviceEndpoints && rel.serviceEndpoints.length > 0) {
     out += `\nSERVICES:\n`;
     for (const s of rel.serviceEndpoints) {
-      out += `  ${s.serviceName} → ${s.endpointCount === 0 ? "0 endpoints ⚠" : `${s.endpointCount} endpoints`}\n`;
+      out += `  ${s.serviceName} ✓ (selector matches pod)\n`;
     }
   }
 
@@ -490,6 +526,25 @@ function execGetResourceChain(name: string, namespace: string, ctx: ClusterConte
   // Helm release
   if (rel.helmRelease) {
     out += `\nHELM RELEASE: ${rel.helmRelease}\n`;
+  }
+
+  // ── Explicit "verified: none" markers ──────────────────────────────────────
+  // These prevent the LLM from reporting empty sections as "unknown / not shown".
+  // They appear only when resolveRelations() ran successfully and a category is
+  // genuinely absent — not because data was unavailable.
+  const noneLines: string[] = [];
+  if (!rel.ownerRef) noneLines.push("OWNER: none (standalone pod, no controller)");
+  if (!rel.hpa)      noneLines.push("HPA: none");
+  if (rel.pvcs.length === 0) noneLines.push("VOLUMES: none (no PVC mounts)");
+  if (rel.presentRefs.length === 0 && rel.missingRefs.length === 0)
+    noneLines.push("REFS (Secrets/ConfigMaps): none referenced");
+  if (!rel.serviceEndpoints || rel.serviceEndpoints.length === 0)
+    noneLines.push("SERVICES: none matching pod labels");
+  if (!rel.ingressChain || rel.ingressChain.length === 0)
+    noneLines.push("INGRESS: none");
+  if (noneLines.length > 0) {
+    out += `\nVERIFIED ABSENT:\n`;
+    for (const l of noneLines) out += `  ${l}\n`;
   }
 
   return out;
