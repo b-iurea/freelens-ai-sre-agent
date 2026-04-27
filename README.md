@@ -1,6 +1,6 @@
 # K8s SRE Assistant — Freelens Extension 
 
-https://b-iurea.github.io/freelens-ollama-extension/
+https://b-iurea.github.io/freelens-ai-sre-agent/
 
 An AI-powered **Kubernetes SRE (Site Reliability Engineer)** assistant embedded directly in Freelens. Chat with any AI model — via **Ollama** or any **OpenAI-compatible endpoint** (LocalAI, OpenAI, LM Studio, etc.) — that sees your live cluster state and adapts its response format to what you're actually asking.
 
