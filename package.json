@@ -1,7 +1,7 @@
 {
-  "name": "@b-iurea/k8s-ollama-extension",
-  "version": "0.3.2",
-  "description": "Kubernetes SRE AI Assistant for Freelens - Chat with Ollama to manage and troubleshoot your clusters",
+  "name": "@b-iurea/k8s-ai-sre-extension",
+  "version": "0.4.0",
+  "description": "Kubernetes SRE AI Assistant for Freelens - Chat with your local AI SRE to manage and troubleshoot your clusters",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/b-iurea/freelens-k8s-ollama-extension.git",

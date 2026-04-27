@@ -1792,7 +1792,7 @@ const FidelityPanel = observer(({ onClose, panelStyle }: { onClose: () => void; 
 
         <p style={{ fontSize: "11px", color: "var(--textColorSecondary, #a6adc8)", margin: 0 }}>
           Compares model output on raw cluster data vs the compressed context it normally receives.
-          Runs 3 Ollama calls (DiagA · DiagB · Judge).
+          Runs 3 AI calls (DiagA · DiagB · Judge).
         </p>
 
         <button
