@@ -476,6 +476,18 @@ src/
 - [ ] **Context fill bar** — visual progress bar showing context budget usage (used vs max tokens) before sending each prompt
 - [ ] **Caveman response mode** — token-saving concise style presets (`lite` / `full` / `ultra`) with chat commands (`/caveman ...`, `/normal`)
 
+### Agent Roadmap (Vision + Actions)
+
+- [ ] **Become goal-driven (not just turn-by-turn chat)** — introduce a task mode with an explicit objective, step-by-step plan, dependencies, and stop criteria
+- [ ] **Become iterative and autonomous in a controlled way** — implement an `observe -> plan -> act -> verify` loop with max-iteration limits, timeouts, and safe fallbacks
+- [ ] **Maintain continuity across real tasks** — add persistent task memory (facts, decisions, pending actions, latest tool outputs) and task resume across sessions
+- [ ] **Orchestrate tools automatically** — choose the next tool based on previous outputs, with UI-visible explainability (`why this tool now`)
+- [ ] **Move from recommendations to executable actions** — support a `propose -> approve -> execute` pipeline for manifests/kubectl, with risk-based granular approvals
+- [ ] **Close the loop with post-action verification** — run automatic checks after each action (events, rollout status, health deltas) and mark success/failure
+- [ ] **Handle failures operationally** — auto-generate rollback/remediation plans when verification fails, with priority and estimated impact
+- [ ] **Make governance and security enterprise-ready** — add policy gates for mutating actions (risk score, mandatory confirmation, deny rules)
+- [ ] **Guarantee full end-to-end auditability** — track a complete `intent -> plan -> actions -> outcomes` timeline exportable for incident review/runbooks
+
 
 ---
 
