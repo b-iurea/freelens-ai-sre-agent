@@ -421,7 +421,6 @@ src/
 - Anomalous resources always survive filtering regardless of query
 - Namespace health rollup gives global cluster visibility at negligible token cost
 - Intent detection skips all analysis overhead for YAML/explain/general queries
-
 ---
 
 ## Known Issues
@@ -432,7 +431,8 @@ src/
 | 2 | **Fidelity score not working as intended** | The hallucination detector produces noisy results on small or fast models and may flag correct K8s names. Score should be treated as indicative only. | WIP |
 | 3 | **Canvas graph: node labels truncated** — resource names are truncated to fit the fixed node width, making it hard to distinguish replicas of the same resource (e.g. three pods named `api-server-7fd464bcc...` all look identical). Kind prefix (`Deployment:`, `Pod:`) uses characters that could be used for the actual name. | Low readability for large graphs | Planned fix: shorter kind prefix abbreviations (`Dp:`, `Pod:`, `Svc:`, `Ing:`) |
 | 4 | **Canvas vs Mermaid graph quality** | The canvas renderer produces a simpler layout than the Mermaid reference. Complex graphs with many cross-level edges are harder to read in canvas form. Node positioning, subgraph support, and edge routing are more limited. | Cosmetic | Gradual improvement planned |
-| 5 | **Cloud / OpenAI-compatible models show `0 t/s`** | OpenAI-compatible endpoints do not return per-token timing data. The stats panel shows `0 t/s` which looks like an error but is normal. A UI label now clarifies this. | Cosmetic — labelled in UI |
+| 5 | **Cloud models show `0 t/s`** | OpenAI-compatible cloud endpoints do not return per-token timing data. The stats panel shows `0 t/s` which looks like an error but is normal. A UI label now clarifies this. | Cosmetic — labelled in UI |
+| 6 | **Fidelity eval works only with Ollama** | The fidelity hallucination detector uses a separate AI call internally. On OpenAI-compatible endpoints this call may doesn't work or return unexpected output, producing no score or a misleading result. | WIP — OpenAI-compatible fidelity support planned |
 
 ---
 
